@@ -8,6 +8,7 @@ export
 
 ## Supported Redis Types:
 
-* ZSET - `redistools.SortedSet'
-* SET - `redistools.Set'
-* HASH - 'redistools.Hash'
+* ZSET - `redis_types.SortedSet`
+* SET - `redis_types.Set`
+* HASH - `redis_types.Hash`
+* LIST - `redis_types.List`
