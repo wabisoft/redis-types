@@ -2,7 +2,7 @@ from setuptools import setup
 
 
 setup(name='redis-types',
-      version='0.0.4',
+      version='0.0.5',
       author='Owen Stranathan',
       author_email='owen@appfigures.com',
       packages=['redis_types'],
