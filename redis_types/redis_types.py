@@ -1,200 +1,256 @@
 import os
+import sys
 import logging
+from distutils.version import StrictVersion
 from collections import namedtuple
+from typing import List as ListType
+from typing import Any
 
-from redis import StrictRedis
-
+import redis
 
 logger = logging.getLogger(__name__)
 
-REDIS_HOST = os.getenv('REDIS_HOST', 'localhost')
-REDIS_PORT = os.getenv('REDIS_PORT', 6379)
-REDIS = StrictRedis(host=REDIS_HOST, port=REDIS_PORT)
+redis_client = None
 
-SortedItem = namedtuple('SortedItem', ['score', 'member'])
+
+def initialize(client_instance):
+    global redis_client
+    redis_client = client_instance
+
+
+def redis_version(redis_client):
+    return StrictVersion(redis_client.execute_command("INFO")["redis_version"])
+
+
+class _NoOpEncoder:
+    def encode(self, value):
+        return value
+
+
+class _NoOpDecoder:
+    def decode(self, value):
+        return value
 
 
 class RedisType(object):
-    def __init__(self, key):
-        self._key = key
+    __encoder__ = _NoOpEncoder()
+    __decoder__ = _NoOpDecoder()
+    __client__: redis.Redis = None
 
-    def key(self):
+    def __init__(self, key: str, use_client=None) -> None:
+        self._key = key
+        self.__client__ = use_client or redis_client
+
+    def key(self) -> str:
         return self._key
 
-    def __str__(self):
+    def __str__(self) -> str:
         return self.key()
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return str(self)
 
 
-class SortedSet(RedisType):
-    def __init__(self, key):
+class ZSet(RedisType):
+    def __init__(self, key: str) -> None:
         RedisType.__init__(self, key)
+        self.withscores = False
 
-    def exists(self, member):  # type: (self, string) -> bool
-        '''Tries to find a members rank to determine if the member exists in the set
-           and returns True if it finds it or False if it does not'''
-        rank = self.rank(member)
-        return True if rank is not None else False
-
-    def rank(self, member):  # type: (self, string) -> int
-        '''Looks for a member in a sorted set at key
-           and returns it's rank (0 based) if it exists or
-           None if it does not'''
-        return REDIS.zrank(self._key, member)
-
-    def score(self, member):  # type: (self, string) -> float
-        '''Same as rank but returns members actual score [-inf, +inf]'''
-        return REDIS.zscore(self._key, member)
-
-    def range(self, start, stop):  # type(self, string, string) -> [SortedItem(string, string)]
-        '''gets a range from start to stop of the sorted set'''
-        items = REDIS.zrange(self._key, start, stop, withscores=True)
-        items = [SortedItem(score, member) for member, score in items]
-        return items
-
-    def revrange(self, start, stop):
-        '''gets range from start to stop sorted in reverse order, revers of range'''
-        items = REDIS.zrevrange(self._key, start, stop, withscores=True)
-        items = [SortedItem(score, member) for member, score in items]
-        return items
-
-    def front(self):
-        '''returns the first member in a redis sorted set without popping'''
-        first = self.range(0, 0)  # returns a list of the zeroth tuple in the zset [(member, score)]
-        if first:
-            return first[0]
-        else:
-            return None
-
-    def back(self):
-        '''returns the last member in a redis sorted set without popping'''
-        last = self.revrange(0, 0)
-        if last:
-            return last[0]
-        else:
-            return None
-
-    def pop_front(self):
-        '''Pops the first member in a redis sorted set'''
-        first = self.front()
-        if first:
-            self.remove(first.member)
-        return first
-
-    def deshift(self):
-        '''Pops (deshifts) first member in the sorted set'''
-        first = self.front()
-        if first:
-            self.remove(first.member)
-        return first
-
-    def pop_back(self):
-        '''Pops the last member in a redis sorted set'''
-        last = self.last()
-        if last:
-            self.remove(last.member)
-        return last
-
-    def pop(self):
-        '''Pops the last member in the sorted set'''
-        last = self.last()
-        if last:
-            self.remove(last.member)
-        return last
-
-    def add(self, score, member):
-        '''Adds a value to the sorted set at the score given'''
-        return REDIS.zadd(self._key, score, member)
-
-    def remove(self, member):
-        '''Removes the specified member from the sorted set'''
-        return REDIS.zrem(self._key, member)
-
-    def cardinality(self):  # type: (self) -> int
-        '''Returns the cardinality (number of elements) of the sorted set'''
-        return REDIS.zcard(self._key)
+    def __contains__(self, item: Any) -> bool:
+        return (
+            self.__client__.zscore(self._key, self.__encoder__.encode(item)) is not None
+        )
 
     def __len__(self):
-        return self.cardinality()
+        return self.__client__.zcard(self._key)
+
+    def __getitem__(self, indices: slice) -> ListType[Any]:
+        """Sugar on range and revrange"""
+        if not isinstance(indices, slice):
+            raise IndexError(
+                "ZSet does not support direct indexing, use a slice instead"
+            )
+        if indices.step == -1:
+            return self.revrange(
+                indices.start or 0, indices.stop if indices.stop is not None else -1
+            )
+        return self.range(
+            indices.start or 0, indices.stop if indices.stop is not None else -1
+        )[:: indices.step]
+
+    def rank(self, member: Any) -> int:
+        """Get index of member"""
+        return self.__client__.zrank(self._key, self.__encoder__.encode(member))
+
+    def score(self, member: Any) -> float:
+        """Get score of member"""
+        return self.__client__.zscore(self._key, self.__encoder__.encode(member))
+
+    def range(self, start: int, stop: int) -> ListType[Any]:
+        return [
+            (self.__decoder__.decode(i[0]), i[1])
+            if self.withscores
+            else self.__decoder__.decode(i)
+            for i in self.__client__.zrange(
+                self._key, start, stop, withscores=self.withscores
+            )
+        ]
+
+    def revrange(self, start: int, stop: int) -> ListType[Any]:
+        return [
+            (self.__decoder__.decode(i[0]), i[1])
+            if self.withscores
+            else self.__decoder__.decode(i)
+            for i in self.__client__.zrevrange(
+                self._key, start, stop, withscores=self.withscores
+            )
+        ]
+
+    def front(self):
+        """returns the first member in a redis sorted set without popping"""
+        return self[0:0]  # weird in python but legal in redis
+
+    def back(self):
+        """returns the last member in a redis sorted set without popping"""
+        return self[-1:-1]  # weird in python but legal in redis
+
+    def unshift(self, count: int = 1) -> Any:
+        """Pops the first `count` members from the from of set in a redis sorted set"""
+        if redis_version(self.__client__) < StrictVersion("5.0.0"):
+            self.withscores = True
+            ret = self.front()
+            self.withscores = False
+            self.remove(ret[0])
+            return (self.__decoder__.decode(ret[0]), ret[1])
+        return [
+            (self.__decoder__.decode(i[0]), i[1])
+            for i in self.__client__.zpopmin(self._key, count=count)
+        ]
+
+    def pop(self, count: int = 1) -> Any:
+        if redis_version(self.__client__) < StrictVersion("5.0.0"):
+            self.withscores = True
+            ret = self.back()
+            self.withscores = False
+            self.remove(ret[0])
+            return (self.__decoder__.decode(ret[0]), ret[1])
+        return [
+            (self.__decoder__.decode(i[0]), i[1])
+            for i in self.__client__.zpopmax(self._key, count=count)
+        ]
+
+    def add(self, mapping):
+        """Adds a value to the sorted set at the score given"""
+        mapping = {
+            self.__encoder__.encode(key): value for key, value in mapping.items()
+        }
+        return self.__client__.zadd(self._key, mapping)
+
+    def remove(self, member):
+        """Removes the specified member from the sorted set"""
+        return self.__client__.zrem(self._key, self.__encoder__.encode(member))
+
+    def card(self) -> int:
+        """Returns the cardinality (number of elements) of the sorted set"""
+        return len(self)
 
 
 class Set(RedisType):
     def __init__(self, key):
         RedisType.__init__(self, key)
 
-    def members(self):
-        '''Return all the members of the set'''
-        return REDIS.smembers(self._key)
-
-    def randmember(self):
-        '''Returns a random member of the set'''
-        return REDIS.srandmember(self._key)
-
-    def add(self, member):
-        '''Adds a member to the set'''
-        return REDIS.sadd(self._key, member)
-
-    def remove(self, member):
-        '''Removes a member from the set'''
-        return REDIS.srem(self._key, member)
-
-    def cardinality(self):
-        '''Returns the cardinality (number of elements) of the set'''
-        return REDIS.scard(self._key)
+    def __contains__(self, item):
+        return self.__client__.sismember(self.__decoder__.decode(item))
 
     def __len__(self):
-        return self.cardinality()
+        return self.__client__.scard(self._key)
+
+    def members(self):
+        """Return all the members of the set"""
+        return {self.__decoder__.decode(i) for i in self.__client__.smembers(self._key)}
+
+    def randmember(self):
+        """Returns a random member of the set"""
+        return self.__decoder__.decode(self.__client__.srandmember(self._key))
+
+    def add(self, member):
+        """Adds a member to the set"""
+        return self.__client__.sadd(self._key, self.__encoder__.encode(member))
+
+    def remove(self, member):
+        """Removes a member from the set"""
+        return self.__client__.srem(self._key, self.__encoder__.encode(member))
+
+    def cardinality(self):
+        """Returns the cardinality (number of elements) of the set"""
+        return len(self)
 
 
 class Hash(RedisType):
     def __init__(self, key):
         RedisType.__init__(self, key)
 
-    @property
-    def length(self):
-        return REDIS.hlen(self._key)
+    def __len__(self):
+        return self.__client__.hlen(self._key)
+
+    def __getitem__(self, key):
+        return self.get(key)
+
+    def __setitem__(self, key, value):
+        return self.set(key, value)
 
     def get(self, field):
-        '''Gets a value at the given key referenced by the given field'''
-        return REDIS.hget(self._key, field)
+        """Gets a value at the given key referenced by the given field"""
+        return self.__client__.hget(self._key, field)
 
     def set(self, field, value):
-        '''Sets the specified field to the given value at the given key'''
-        return REDIS.hset(self._key, field, value)
+        """Sets the specified field to the given value at the given key"""
+        return self.__client__.hset(self._key, field, self.__encoder__.encode(value))
 
     def get_all(self):
-        '''Returns all field/value pairs in the Hash'''
-        return REDIS.hgetall(self._key)
+        """Returns all field/value pairs in the Hash"""
+        return {
+            key: self.__decoder__.decode(value)
+            for key, value in self.__client__.hgetall(self._key).items()
+        }
 
     def delete(self, field):
-        '''Deletes a field from the hash'''
-        return REDIS.hdel(self._key, field)
-
-    def __len__(self):
-        return self.length
+        """Deletes a field from the hash"""
+        return self.__client__.hdel(self._key, field)
 
 
 class List(RedisType):
     def __init__(self, key):
         RedisType.__init__(self, key)
 
-    @property
-    def length(self):
-        return REDIS.llen(self._key)
+    def __len__(self):
+        return self.__client__.llen(self._key)
 
-    def push(self, value):
-        return REDIS.rpush(self._key, value)
+    def __bool__(self):
+        return len(self) > 0
+
+    def __getitem__(self, index):
+        if isinstance(index, slice):
+            return self.lrange(index.start, index.stop)[:: index.step]
+        return self.lindex(index)
+
+    def lindex(self, index):
+        return self.__decoder__.decode(self.__client__.lindex(index))
+
+    def lrange(self, start, stop):
+        return [
+            self.__decoder__.decode(i)
+            for i in self.__client__.lrange(self._key, start, stop)
+        ]
+
+    def shift(self, item):
+        self.__client__.lpush(self._key, self.__encoder__.encode(item))
+
+    def unshift(self):
+        return self.__decoder__.decode(self.__client__.lpop(self._key))
+
+    def push(self, item):
+        self.__client__.rpush(self._key, self.__encoder__.encode(item))
 
     def pop(self):
-        return REDIS.rpop(self._key)
-
-    def shift(self, value):
-        return REDIS.lpush(self._key, value)
-
-    def deshift(self):
-        return REDIS.lpop(self._key)
-
-    def __len__(self):
-        return self.length
+        return self.__decoder__.decode(self.__client__.rpop(self._key))
