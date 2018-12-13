@@ -11,6 +11,4 @@ setup(name='redis-types',
       description='Some better abstraction on redis types',
       long_description=open("README.md").read(),
       zip_safe=False,
-      install_requires=[
-          "redis"
-      ])
+      install_requires=[])
