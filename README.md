@@ -1,3 +1,6 @@
+# This is ill conceived and bad. Never use this.
+
+
 # Usage
 
 Defaults to connection on localhost:6379.
