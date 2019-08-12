@@ -3,7 +3,7 @@
 PLEASE DON'T USE THIS CODE, LEAVING HERE AS EXAMPLE TO MYSELF OF HOW NOT TO PROGRAM
 
 The reason I think this code (while well intended) is bad is because it needlessly 
-abstracts from the use of redis and only for the gain of some syntactic ease of use while adding lot's of overhead.
+abstracts from the use of redis and only for the gain of some syntactic ease of use while adding lots of overhead.
 
 It also makes it much harder to see and debug where and when your code is using redis, which is something
 you want to be able to determine very easily.
